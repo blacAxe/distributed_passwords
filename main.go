@@ -6,8 +6,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"net"
 
 	"github.com/hashicorp/memberlist"
+	"google.golang.org/grpc"
+	"github.com/omar/distributed-cracker/proto"
 )
 
 func main() {
@@ -43,6 +46,28 @@ func main() {
 		}
 	}
 
+	// Calculate a gRPC port based on the BIND_PORT to avoid conflicts
+	grpcPort := 50051
+	if bindPort != "" {
+		fmt.Sscanf(bindPort, "%d", &grpcPort)
+		grpcPort = grpcPort - 7946 + 50051 // Offset based on gossip port
+	}
+
+	// Start gRPC server in a goroutine
+	go func() {
+		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
+		if err != nil {
+			fmt.Printf("gRPC failed to listen: %v\n", err)
+			return
+		}
+		s := grpc.NewServer()
+		proto.RegisterCrackerServiceServer(s, &WorkerServer{})
+		fmt.Printf("gRPC Server listening on port %d\n", grpcPort)
+		if err := s.Serve(lis); err != nil {
+			fmt.Printf("gRPC failed to serve: %v\n", err)
+		}
+	}()
+	
 	for {
 		// Get all members and sort them alphabetically by Name
 		members := list.Members()
