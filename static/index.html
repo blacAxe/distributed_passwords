@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Distributed Cracker</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center; background: #f4f4f9; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        input { width: 80%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        #status { margin-top: 20px; font-weight: bold; color: #d9534f; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>MD5 Distributed Cracker</h2>
+        <input type="text" id="hashInput" placeholder="Enter MD5 Hash (e.g. abc = 900150983cd24fb0d6963f7d28e17f72)">
+        <button onclick="startCrack()">Start Cracking</button>
+        <div id="status">Waiting for input...</div>
+    </div>
+
+    <script>
+        async function startCrack() {
+            const hash = document.getElementById('hashInput').value;
+            await fetch('/crack', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ hash: hash })
+            });
+            checkStatus();
+        }
+
+        async function checkStatus() {
+            const res = await fetch('/status');
+            const data = await res.json();
+            const statusDiv = document.getElementById('status');
+            
+            if (data.found) {
+                statusDiv.innerHTML = `<span style="color:green">SUCCESS! Password: ${data.password}</span>`;
+            } else if (data.hash) {
+                statusDiv.innerText = "Cracking in progress...";
+                setTimeout(checkStatus, 2000);
+            }
+        }
+    </script>
+</body>
+</html>

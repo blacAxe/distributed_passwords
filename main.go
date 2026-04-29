@@ -14,7 +14,12 @@ import (
 	"google.golang.org/grpc"
 )
 
-var crackedPassword string
+type ManagerNode struct {
+	CurrentHash   string
+	FoundPassword string
+}
+
+var globalManager = &ManagerNode{}
 
 func main() {
 	hostname, _ := os.Hostname()
@@ -71,6 +76,12 @@ func main() {
 		}
 	}()
 
+	apiPort := 8080
+	if bindPort != "" {
+		apiPort = 8081 // Second node gets 8081
+	}
+	go StartAPIServer(globalManager, apiPort)
+
 	for {
 		// Get all members and sort them alphabetically by Name
 		members := list.Members()
@@ -83,51 +94,50 @@ func main() {
 
 		fmt.Println("--- Cluster Status ---")
 		if manager.Name == local.Name {
-			if crackedPassword != "" {
-				fmt.Printf("--- TASK COMPLETE! Password is: %s ---\n", crackedPassword)
-				time.Sleep(10 * time.Second)
-				continue
-			}
+			// Only proceed if the API has given a hash and it's not solved yet
+			if globalManager.CurrentHash != "" && globalManager.FoundPassword == "" {
 
-			// Get only the Workers (exclude the Manager)
-			var workers []*memberlist.Node
-			for _, m := range members {
-				if m.Name != local.Name {
-					workers = append(workers, m)
+				// Identify Workers
+				var workers []*memberlist.Node
+				for _, m := range members {
+					if m.Name != local.Name {
+						workers = append(workers, m)
+					}
 				}
-			}
 
-			numWorkers := len(workers)
-			if numWorkers > 0 {
-				fmt.Printf("ROLE: [ MANAGER ] | Splitting work between %d workers\n", numWorkers)
+				numWorkers := len(workers)
+				if numWorkers > 0 {
+					fmt.Printf("ROLE: [ MANAGER ] | Splitting work for hash: %s\n", globalManager.CurrentHash)
 
-				alphabet := "abcdefghijklmnopqrstuvwxyz"
-				chunkSize := len(alphabet) / numWorkers
+					alphabet := "abcdefghijklmnopqrstuvwxyz"
+					chunkSize := len(alphabet) / numWorkers
 
-				for i, w := range workers {
-					// Divide the work into ranges of the alphabet based on the number of workers
-					startIdx := i * chunkSize
-					endIdx := (i + 1) * chunkSize
-					if i == numWorkers-1 {
-						endIdx = len(alphabet)
-					} // Catch the remainder
-
-					startRange := string(alphabet[startIdx])
-					endRange := string(alphabet[endIdx-1])
-
-					fmt.Printf(">>> Sending Range [%s-%s] to Worker %s\n", startRange, endRange, w.Name)
-
-					// Dispatch in background
-					go func(addr string, port int, s string, e string) {
-						res := sendTask(addr, port, "900150983cd24fb0d6963f7d28e17f72", s, e)
-						if res != "" {
-							crackedPassword = res // 4. Update State
+					for i, w := range workers {
+						startIdx := i * chunkSize
+						endIdx := (i + 1) * chunkSize
+						if i == numWorkers-1 {
+							endIdx = len(alphabet)
 						}
-					}(w.Addr.String(), int(w.Port), startRange, endRange)
+
+						startRange := string(alphabet[startIdx])
+						endRange := string(alphabet[endIdx-1])
+
+						// Dispatch using the globalManager state
+						go func(addr string, port int, s string, e string) {
+							res := sendTask(addr, port, globalManager.CurrentHash, s, e)
+							if res != "" {
+								// Update the global state when a worker finds it
+								fmt.Printf("!!! PASSWORD FOUND: %s\n", res)
+								globalManager.FoundPassword = res
+							}
+						}(w.Addr.String(), int(w.Port), startRange, endRange)
+					}
 				}
+			} else if globalManager.FoundPassword != "" {
+				fmt.Printf("--- TASK COMPLETE! Password is: %s ---\n", globalManager.FoundPassword)
+			} else {
+				fmt.Println("ROLE: [ MANAGER ] | Waiting for hash via API...")
 			}
-		} else {
-			fmt.Printf("ROLE: [ WORKER ]  | Manager is: %s\n", manager.Name)
 		}
 
 		time.Sleep(5 * time.Second)
