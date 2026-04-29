@@ -3,7 +3,7 @@ syntax = "proto3";
 package cracker;
 
 // This will ensure Go knows where to generate the files
-option go_package = "github.com/yourname/distributed-cracker/proto";
+option go_package = "github.com/omar/distributed-cracker/proto";
 
 service CrackerService {
     // The Manager calls this on the Worker

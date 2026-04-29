@@ -3,8 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
-	"strings" // Add this
 
 	"github.com/hashicorp/memberlist"
 )
@@ -12,7 +13,8 @@ import (
 func main() {
 	hostname, _ := os.Hostname()
 	config := memberlist.DefaultLocalConfig()
-	config.Name = fmt.Sprintf("%s-%d", hostname, time.Now().UnixNano()%1000)
+	// The timestamp here acts as our "seniority"
+	config.Name = fmt.Sprintf("%s-%d", hostname, time.Now().UnixNano()%1000000)
 
 	// Check for a custom bind port (so we can run multiple on one machine)
 	bindPort := os.Getenv("BIND_PORT")
@@ -42,7 +44,22 @@ func main() {
 	}
 
 	for {
-		fmt.Printf("Cluster Members: %d\n", list.NumMembers())
+		// Get all members and sort them alphabetically by Name
+		members := list.Members()
+		sort.Slice(members, func(i, j int) bool {
+			return members[i].Name < members[j].Name
+		})
+
+		// The first member in the sorted list is the Manager
+		manager := members[0]
+
+		fmt.Println("--- Cluster Status ---")
+		if manager.Name == local.Name {
+			fmt.Printf("ROLE: [ MANAGER ] | Nodes in cluster: %d\n", len(members))
+		} else {
+			fmt.Printf("ROLE: [ WORKER ]  | Manager is: %s\n", manager.Name)
+		}
+
 		time.Sleep(5 * time.Second)
 	}
 }
