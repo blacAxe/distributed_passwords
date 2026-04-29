@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"context"
 	"net"
 
 	"github.com/hashicorp/memberlist"
@@ -67,7 +68,7 @@ func main() {
 			fmt.Printf("gRPC failed to serve: %v\n", err)
 		}
 	}()
-	
+
 	for {
 		// Get all members and sort them alphabetically by Name
 		members := list.Members()
@@ -81,10 +82,50 @@ func main() {
 		fmt.Println("--- Cluster Status ---")
 		if manager.Name == local.Name {
 			fmt.Printf("ROLE: [ MANAGER ] | Nodes in cluster: %d\n", len(members))
+			
+			// If there are other nodes, then send them a test task
+			for _, m := range members {
+				if m.Name != local.Name {
+					fmt.Printf(">>> Dispatching task to Worker: %s\n", m.Name)
+					go sendTask(m.Addr.String(), int(m.Port), "5d41402abc4b2a76b9719d911017c592") // this is md5 for 'hello'
+				}
+			}
 		} else {
 			fmt.Printf("ROLE: [ WORKER ]  | Manager is: %s\n", manager.Name)
 		}
 
 		time.Sleep(5 * time.Second)
+	}
+}
+
+func sendTask(workerAddr string, workerPort int, targetHash string) {
+	// Calculate the worker's gRPC port based on their Gossip port
+	// (Matching the logic that was used to start the server)
+	grpcPort := workerPort - 7946 + 50051
+
+	// Dial the worker
+	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", workerAddr, grpcPort), grpc.WithInsecure())
+	if err != nil {
+		fmt.Printf("Could not connect to worker %s: %v\n", workerAddr, err)
+		return
+	}
+	defer conn.Close()
+
+	client := proto.NewCrackerServiceClient(conn)
+
+	// Send a test task
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	resp, err := client.ProcessTask(ctx, &proto.TaskRequest{
+		TargetHash: targetHash,
+		StartRange: "a",
+		EndRange:   "z",
+	})
+
+	if err != nil {
+		fmt.Printf("Failed to send task to %s: %v\n", workerAddr, err)
+	} else {
+		fmt.Printf("Worker response: Found=%v, Password=%s\n", resp.Found, resp.Password)
 	}
 }
