@@ -1,17 +1,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"os"
 	"sort"
 	"strings"
 	"time"
-	"context"
-	"net"
 
 	"github.com/hashicorp/memberlist"
-	"google.golang.org/grpc"
 	"github.com/omar/distributed-cracker/proto"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -82,12 +82,12 @@ func main() {
 		fmt.Println("--- Cluster Status ---")
 		if manager.Name == local.Name {
 			fmt.Printf("ROLE: [ MANAGER ] | Nodes in cluster: %d\n", len(members))
-			
+
 			// If there are other nodes, then send them a test task
 			for _, m := range members {
 				if m.Name != local.Name {
 					fmt.Printf(">>> Dispatching task to Worker: %s\n", m.Name)
-					go sendTask(m.Addr.String(), int(m.Port), "5d41402abc4b2a76b9719d911017c592") // this is md5 for 'hello'
+					go sendTask(m.Addr.String(), int(m.Port), "900150983cd24fb0d6963f7d28e17f72") // this is md5 for 'hello'
 				}
 			}
 		} else {
