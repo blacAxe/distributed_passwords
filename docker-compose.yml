@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  node:
+    build: .
+    image: distributed-cracker:latest
+    deploy:
+      replicas: 3  # This will start 3 nodes automatically
+    environment:
+      - BIND_ADDR=0.0.0.0
+    command: ["go", "run", "main.go"]
