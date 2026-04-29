@@ -14,6 +14,8 @@ import (
 	"google.golang.org/grpc"
 )
 
+var crackedPassword string
+
 func main() {
 	hostname, _ := os.Hostname()
 	config := memberlist.DefaultLocalConfig()
@@ -81,13 +83,47 @@ func main() {
 
 		fmt.Println("--- Cluster Status ---")
 		if manager.Name == local.Name {
-			fmt.Printf("ROLE: [ MANAGER ] | Nodes in cluster: %d\n", len(members))
+			if crackedPassword != "" {
+				fmt.Printf("--- TASK COMPLETE! Password is: %s ---\n", crackedPassword)
+				time.Sleep(10 * time.Second)
+				continue
+			}
 
-			// If there are other nodes, then send them a test task
+			// Get only the Workers (exclude the Manager)
+			var workers []*memberlist.Node
 			for _, m := range members {
 				if m.Name != local.Name {
-					fmt.Printf(">>> Dispatching task to Worker: %s\n", m.Name)
-					go sendTask(m.Addr.String(), int(m.Port), "900150983cd24fb0d6963f7d28e17f72") // this is md5 for 'hello'
+					workers = append(workers, m)
+				}
+			}
+
+			numWorkers := len(workers)
+			if numWorkers > 0 {
+				fmt.Printf("ROLE: [ MANAGER ] | Splitting work between %d workers\n", numWorkers)
+
+				alphabet := "abcdefghijklmnopqrstuvwxyz"
+				chunkSize := len(alphabet) / numWorkers
+
+				for i, w := range workers {
+					// Divide the work into ranges of the alphabet based on the number of workers
+					startIdx := i * chunkSize
+					endIdx := (i + 1) * chunkSize
+					if i == numWorkers-1 {
+						endIdx = len(alphabet)
+					} // Catch the remainder
+
+					startRange := string(alphabet[startIdx])
+					endRange := string(alphabet[endIdx-1])
+
+					fmt.Printf(">>> Sending Range [%s-%s] to Worker %s\n", startRange, endRange, w.Name)
+
+					// Dispatch in background
+					go func(addr string, port int, s string, e string) {
+						res := sendTask(addr, port, "900150983cd24fb0d6963f7d28e17f72", s, e)
+						if res != "" {
+							crackedPassword = res // 4. Update State
+						}
+					}(w.Addr.String(), int(w.Port), startRange, endRange)
 				}
 			}
 		} else {
@@ -98,7 +134,7 @@ func main() {
 	}
 }
 
-func sendTask(workerAddr string, workerPort int, targetHash string) {
+func sendTask(workerAddr string, workerPort int, targetHash, start, end string) string {
 	// Calculate the worker's gRPC port based on their Gossip port
 	// (Matching the logic that was used to start the server)
 	grpcPort := workerPort - 7946 + 50051
@@ -106,26 +142,24 @@ func sendTask(workerAddr string, workerPort int, targetHash string) {
 	// Dial the worker
 	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", workerAddr, grpcPort), grpc.WithInsecure())
 	if err != nil {
-		fmt.Printf("Could not connect to worker %s: %v\n", workerAddr, err)
-		return
+		return ""
 	}
 	defer conn.Close()
 
 	client := proto.NewCrackerServiceClient(conn)
 
 	// Send a test task
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
 	resp, err := client.ProcessTask(ctx, &proto.TaskRequest{
 		TargetHash: targetHash,
-		StartRange: "a",
-		EndRange:   "z",
+		StartRange: start,
+		EndRange:   end,
 	})
 
-	if err != nil {
-		fmt.Printf("Failed to send task to %s: %v\n", workerAddr, err)
-	} else {
-		fmt.Printf("Worker response: Found=%v, Password=%s\n", resp.Found, resp.Password)
+	if err == nil && resp.Found {
+		return resp.Password
 	}
+	return ""
 }
