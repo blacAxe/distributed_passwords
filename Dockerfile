@@ -1,10 +1,18 @@
-FROM golang:1.22
-
+FROM golang:1.23-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN go mod download
+# CGO_ENABLED=0 makes the binary statically linked (more portable)
+RUN CGO_ENABLED=0 go build -o cracker .
 
-# Memberlist uses these ports
-EXPOSE 7946/tcp 7946/udp
+FROM alpine:latest
+WORKDIR /root/
+# Copy the binary from the builder stage
+COPY --from=builder /app/cracker .
+# Recreate the static folder and copy the file
+RUN mkdir static
+COPY --from=builder /app/static/index.html ./static/
 
-CMD ["go", "run", "main.go"]
+EXPOSE 8080 7946 50051
+# Ensure the binary has execution permissions
+RUN chmod +x ./cracker
+CMD ["./cracker"]

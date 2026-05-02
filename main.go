@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"os/signal" 
+    "syscall"   
 
 	"github.com/hashicorp/memberlist"
 	"github.com/omar/distributed-cracker/proto"
@@ -15,19 +17,30 @@ import (
 )
 
 type ManagerNode struct {
-	CurrentHash   string
-	FoundPassword string
+    CurrentHash   string
+    FoundPassword string
+    IsProcessing  bool
+    CancelFunc    context.CancelFunc // Add this
 }
 
 var globalManager = &ManagerNode{}
+var apiStarted = false
 
 func main() {
 	hostname, _ := os.Hostname()
 	config := memberlist.DefaultLocalConfig()
-	// The timestamp here acts as our "seniority"
-	config.Name = fmt.Sprintf("%s-%d", hostname, time.Now().UnixNano()%1000000)
+	role := os.Getenv("ROLE")
 
-	// Check for a custom bind port (so we can run multiple on one machine)
+	globalManager.FoundPassword = loadResult()
+
+	if role == "MANAGER" {
+		// Giving it a prefix of 00 ensures it is always first in the sorted list
+		config.Name = fmt.Sprintf("00-manager-%s", hostname)
+	} else {
+		config.Name = fmt.Sprintf("worker-%s-%d", hostname, time.Now().UnixNano()%1000)
+	}
+
+	// Check for a custom bind port
 	bindPort := os.Getenv("BIND_PORT")
 	if bindPort != "" {
 		var p int
@@ -36,9 +49,18 @@ func main() {
 	}
 
 	list, err := memberlist.Create(config)
-	if err != nil {
-		panic(err)
-	}
+    if err != nil { panic(err) }
+
+    // Shutdown logic
+    sigChan := make(chan os.Signal, 1)
+    signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+    go func() {
+        <-sigChan
+        fmt.Println("\n[SHUTDOWN] Leaving cluster and stopping gRPC...")
+        list.Leave(time.Second * 5)
+        list.Shutdown()
+        os.Exit(0)
+    }()
 
 	local := list.LocalNode()
 	fmt.Printf("Node [%s] is alive at %s:%d\n", local.Name, local.Addr, local.Port)
@@ -46,7 +68,7 @@ func main() {
 	// Look for an environment variable called JOIN_ADDR
 	joinAddr := os.Getenv("JOIN_ADDR")
 	if joinAddr != "" {
-		// Split multiple addresses if provided (comma separated)
+		// Split multiple addresses if provided
 		parts := strings.Split(joinAddr, ",")
 		_, err := list.Join(parts)
 		if err != nil {
@@ -55,15 +77,12 @@ func main() {
 	}
 
 	// Calculate a gRPC port based on the BIND_PORT to avoid conflicts
-	grpcPort := 50051
-	if bindPort != "" {
-		fmt.Sscanf(bindPort, "%d", &grpcPort)
-		grpcPort = grpcPort - 7946 + 50051 // Offset based on gossip port
-	}
+	grpcPort := 50051 // Default gRPC port
+	apiPort := 8080   // Static port for all containers
 
 	// Start gRPC server in a goroutine
 	go func() {
-		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
+		lis, err := net.Listen("tcp", ":50051")
 		if err != nil {
 			fmt.Printf("gRPC failed to listen: %v\n", err)
 			return
@@ -76,12 +95,8 @@ func main() {
 		}
 	}()
 
-	apiPort := 8080
-	if bindPort != "" {
-		apiPort = 8081 // Second node gets 8081
-	}
-	go StartAPIServer(globalManager, apiPort)
-
+	fmt.Println("Waiting for cluster to stabilize...")
+	time.Sleep(5 * time.Second)
 	for {
 		// Get all members and sort them alphabetically by Name
 		members := list.Members()
@@ -94,43 +109,57 @@ func main() {
 
 		fmt.Println("--- Cluster Status ---")
 		if manager.Name == local.Name {
+			if !apiStarted {
+				fmt.Printf("ROLE: [ LEADER ] | Starting API on :%d\n", apiPort)
+				go StartAPIServer(globalManager, apiPort)
+				apiStarted = true
+			}
 			// Only proceed if the API has given a hash and it's not solved yet
-			if globalManager.CurrentHash != "" && globalManager.FoundPassword == "" {
+			// Only start work if we have a hash AND we aren't already working on it
+			if globalManager.CurrentHash != "" && globalManager.FoundPassword == "" && !globalManager.IsProcessing {
 
-				// Identify Workers
-				var workers []*memberlist.Node
-				for _, m := range members {
-					if m.Name != local.Name {
-						workers = append(workers, m)
-					}
-				}
+				globalManager.IsProcessing = true
+				
+				// Create a Master Context for this specific hash job
+				// This allows to kill all worker requests at once
+				ctx, cancel := context.WithCancel(context.Background())
+				globalManager.CancelFunc = cancel 
 
+				workers := getWorkers(members, local.Name)
 				numWorkers := len(workers)
-				if numWorkers > 0 {
-					fmt.Printf("ROLE: [ MANAGER ] | Splitting work for hash: %s\n", globalManager.CurrentHash)
 
-					alphabet := "abcdefghijklmnopqrstuvwxyz"
-					chunkSize := len(alphabet) / numWorkers
+				if numWorkers > 0 {
+					fmt.Printf("ROLE: [ MANAGER ] | Dispatching task to %d workers...\n", numWorkers)
+					alphabet := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+					totalChars := len(alphabet)
+					chunkSize := totalChars / numWorkers
 
 					for i, w := range workers {
 						startIdx := i * chunkSize
 						endIdx := (i + 1) * chunkSize
 						if i == numWorkers-1 {
-							endIdx = len(alphabet)
+							endIdx = totalChars
 						}
 
 						startRange := string(alphabet[startIdx])
 						endRange := string(alphabet[endIdx-1])
 
-						// Dispatch using the globalManager state
-						go func(addr string, port int, s string, e string) {
-							res := sendTask(addr, port, globalManager.CurrentHash, s, e)
+						fmt.Printf("[MANAGER] Worker %d (%s) assigned range: %s to %s\n", i, w.Addr.String(), startRange, endRange)
+
+						// Launch workers
+						go func(addr string, s, e, alph string) {
+							res := sendTask(ctx, addr, globalManager.CurrentHash, s, e, alph)
+							
 							if res != "" {
-								// Update the global state when a worker finds it
 								fmt.Printf("!!! PASSWORD FOUND: %s\n", res)
 								globalManager.FoundPassword = res
+								
+								// STOP ALL OTHER WORKERS
+								globalManager.CancelFunc() 
+
+								saveResult(res) 
 							}
-						}(w.Addr.String(), int(w.Port), startRange, endRange)
+						}(w.Addr.String(), startRange, endRange, alphabet)
 					}
 				}
 			} else if globalManager.FoundPassword != "" {
@@ -144,32 +173,67 @@ func main() {
 	}
 }
 
-func sendTask(workerAddr string, workerPort int, targetHash, start, end string) string {
-	// Calculate the worker's gRPC port based on their Gossip port
-	// (Matching the logic that was used to start the server)
-	grpcPort := workerPort - 7946 + 50051
+func sendTask(ctx context.Context, workerAddr string, targetHash, start, end, alphabet string) string {
+    grpcPort := 50051
+    // Use DialContext for better integration with the cancellation signal
+    conn, err := grpc.Dial(fmt.Sprintf("%s:%d", workerAddr, grpcPort), grpc.WithInsecure())
+    if err != nil {
+        return ""
+    }
+    defer conn.Close()
 
-	// Dial the worker
-	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", workerAddr, grpcPort), grpc.WithInsecure())
-	if err != nil {
-		return ""
+    client := proto.NewCrackerServiceClient(conn)
+
+    // Use the ctx passed from the manager. 
+    // If globalManager.CancelFunc() is called, this ProcessTask will return immediately.
+    resp, err := client.ProcessTask(ctx, &proto.TaskRequest{
+        TargetHash: targetHash,
+        StartRange: start,
+        EndRange:   end,
+        Alphabet:   alphabet,
+    })
+
+    if err != nil {
+        // Only print error if it wasn't a intentional cancellation
+        if ctx.Err() == nil {
+            fmt.Printf("[ERROR] gRPC call failed: %v\n", err)
+        }
+        return ""
+    }
+
+    if resp.Found {
+        return resp.Password
+    }
+    return ""
+}
+
+// getWorkers filters the memberlist to return only nodes that are NOT the manager
+func getWorkers(members []*memberlist.Node, localName string) []*memberlist.Node {
+	var workers []*memberlist.Node
+	for _, m := range members {
+		// If the node name doesn't match the manager's name, it's a worker
+		if m.Name != localName {
+			workers = append(workers, m)
+		}
 	}
-	defer conn.Close()
+	return workers
+}
 
-	client := proto.NewCrackerServiceClient(conn)
+func saveResult(password string) {
+    // Use the full path inside the container to avoid confusion
+    filename := "/root/result.json" 
+    err := os.WriteFile(filename, []byte(password), 0644)
+    if err != nil {
+        fmt.Printf("[ERROR] Failed to write to %s: %v\n", filename, err)
+    } else {
+        fmt.Printf("[SUCCESS] Password '%s' written to %s\n", password, filename)
+    }
+}
 
-	// Send a test task
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-	defer cancel()
-
-	resp, err := client.ProcessTask(ctx, &proto.TaskRequest{
-		TargetHash: targetHash,
-		StartRange: start,
-		EndRange:   end,
-	})
-
-	if err == nil && resp.Found {
-		return resp.Password
-	}
-	return ""
+func loadResult() string {
+    // Use the full path inside the container to avoid confusion
+    filename := "/root/result.json"
+    data, err := os.ReadFile(filename)
+    if err != nil { return "" }
+    return string(data)
 }

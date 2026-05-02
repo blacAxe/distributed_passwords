@@ -3,18 +3,18 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"sync" // Added for safety
 
 	"github.com/gin-gonic/gin"
 )
 
-// StartAPIServer starts a web server to accept hashes
+var mu sync.Mutex
+
 func StartAPIServer(manager *ManagerNode, port int) {
 	r := gin.Default()
 
-	// This tells Gin to look in the /static folder
 	r.StaticFile("/", "./static/index.html")
 
-	// Route to submit a hash
 	r.POST("/crack", func(c *gin.Context) {
 		var input struct {
 			Hash string `json:"hash"`
@@ -24,19 +24,29 @@ func StartAPIServer(manager *ManagerNode, port int) {
 			return
 		}
 
-		// Tell the manager to start cracking this new hash
+		mu.Lock()
+		// Reset everything for a fresh run
 		manager.CurrentHash = input.Hash
-		manager.FoundPassword = "" // Reset state
+		manager.FoundPassword = ""
+		manager.IsProcessing = false 
+		
+		// Kill any existing background worker calls
+		if manager.CancelFunc != nil {
+			manager.CancelFunc()
+		}
+		mu.Unlock()
 
 		c.JSON(http.StatusOK, gin.H{"status": "Cracking started", "hash": input.Hash})
 	})
 
-	// Route to check status
 	r.GET("/status", func(c *gin.Context) {
+		mu.Lock()
+		defer mu.Unlock()
 		c.JSON(http.StatusOK, gin.H{
 			"hash":     manager.CurrentHash,
 			"found":    manager.FoundPassword != "",
 			"password": manager.FoundPassword,
+			"busy":     manager.IsProcessing,
 		})
 	})
 
