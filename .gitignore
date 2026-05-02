@@ -1,0 +1,18 @@
+# Binaries
+main
+distributed-cracker
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Result files
+result.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dev Container
+.devcontainer/

@@ -1,11 +1,28 @@
-version: '3.8'
-
 services:
-  node:
+  manager:
     build: .
-    image: distributed-cracker:latest
-    deploy:
-      replicas: 3  # This will start 3 nodes automatically
+    ports:
+      - "8080:8080"
     environment:
-      - BIND_ADDR=0.0.0.0
-    command: ["go", "run", "main.go"]
+      - ROLE=MANAGER
+    volumes:
+      - ./result.json:/root/result.json 
+    networks:
+      - cluster-net
+
+  worker:
+    build: .
+    depends_on:
+      - manager
+    environment:
+      - ROLE=WORKER
+      - JOIN_ADDR=manager:7946
+    deploy:
+      replicas: 3
+    networks:
+      - cluster-net
+
+
+networks:
+  cluster-net:
+    driver: bridge
