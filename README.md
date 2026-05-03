@@ -1,5 +1,8 @@
 # Distributed MD5 Cracker
 
+## Category
+Distributed Systems
+
 ## How to Run
 1. **Start the Manager:**
    `go run .` (Starts on port 8080)
